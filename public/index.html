@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PulseBoard - Redis Real-Time Quiz & Leaderboard</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <!-- FontAwesome for Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <!-- Custom Styling -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="glow-container">
+    <div class="glow-spot glow-1"></div>
+    <div class="glow-spot glow-2"></div>
+  </div>
+
+  <header class="app-header">
+    <div class="header-logo">
+      <i class="fa-solid fa-bolt logo-icon"></i>
+      <h1>PulseBoard</h1>
+      <span class="badge-beta">v1.0 - Redis Live</span>
+    </div>
+    <div class="connection-status" id="connectionStatus">
+      <span class="status-indicator pinging"></span>
+      <span class="status-text">Connecting to Live Stream...</span>
+    </div>
+  </header>
+
+  <!-- Live Event Ticker -->
+  <section class="ticker-section">
+    <div class="ticker-title">
+      <i class="fa-solid fa-tower-broadcast"></i> Live Feed:
+    </div>
+    <div class="ticker-wrapper">
+      <div class="ticker-content" id="eventTicker">
+        <div class="ticker-item system-msg">PulseBoard live event stream initialized. Waiting for events...</div>
+      </div>
+    </div>
+  </section>
+
+  <main class="dashboard-grid">
+    <!-- Left Column: Leaderboard -->
+    <section class="card leaderboard-card">
+      <div class="card-header">
+        <div class="header-title">
+          <i class="fa-solid fa-trophy header-icon icon-gold"></i>
+          <h2>Global Leaderboard</h2>
+        </div>
+        <div class="leaderboard-actions">
+          <button id="btnRefreshLeaderboard" class="btn btn-secondary btn-sm" title="Refresh Now">
+            <i class="fa-solid fa-arrows-rotate"></i>
+          </button>
+        </div>
+      </div>
+      <div class="leaderboard-table-container">
+        <table class="leaderboard-table">
+          <thead>
+            <tr>
+              <th class="col-rank">Rank</th>
+              <th class="col-player">Player</th>
+              <th class="col-score">Score</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboardBody">
+            <tr>
+              <td colspan="3" class="table-loading">
+                <i class="fa-solid fa-spinner fa-spin"></i> Loading top players...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Right Column: Controls and Details -->
+    <div class="details-column">
+      <!-- Section A: Player Stats Finder -->
+      <section class="card stats-card">
+        <div class="card-header">
+          <div class="header-title">
+            <i class="fa-solid fa-id-card header-icon icon-blue"></i>
+            <h2>Player Performance Finder</h2>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="input-group">
+            <input type="text" id="txtSearchPlayerId" placeholder="Enter Player ID (e.g. player-1)" value="player-alpha">
+            <button id="btnSearchPlayer" class="btn btn-primary">Find Stats</button>
+          </div>
+          
+          <div id="playerStatsResult" class="player-stats-display hidden">
+            <div class="stats-overview">
+              <div class="stat-box">
+                <span class="stat-label">Global Rank</span>
+                <span class="stat-value" id="lblPlayerRank">-</span>
+              </div>
+              <div class="stat-box">
+                <span class="stat-label">Total Score</span>
+                <span class="stat-value" id="lblPlayerScore">-</span>
+              </div>
+            </div>
+
+            <!-- Percentile Sleek Bar -->
+            <div class="percentile-wrapper">
+              <div class="percentile-header">
+                <span>Percentile Performance</span>
+                <span class="percentile-val" id="lblPlayerPercentile">0%</span>
+              </div>
+              <div class="percentile-bar-outer">
+                <div class="percentile-bar-inner" id="pbPlayerPercentile" style="width: 0%;"></div>
+              </div>
+              <p class="percentile-desc">Player has a higher score than <strong id="lblPlayerPercentileText">0%</strong> of participants.</p>
+            </div>
+
+            <!-- Nearby Players -->
+            <div class="nearby-players-section">
+              <h3>Nearby Rivals</h3>
+              <div class="rival-list" id="rivalList">
+                <!-- Will be populated dynamically -->
+              </div>
+            </div>
+          </div>
+          <div id="playerStatsEmpty" class="display-empty">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <p>Search for a player to view global standing and local rivals.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Section B: Quiz Play Console -->
+      <section class="card game-card">
+        <div class="card-header">
+          <div class="header-title">
+            <i class="fa-solid fa-gamepad header-icon icon-purple"></i>
+            <h2>Real-Time Quiz Console</h2>
+          </div>
+        </div>
+        <div class="card-body">
+          <!-- Easy Seeder helper tools for testing -->
+          <div class="seeder-shortcuts">
+            <span class="shortcuts-label">Seed Game Round:</span>
+            <div class="btn-group">
+              <button id="btnSeedActiveRound" class="btn btn-accent btn-sm">
+                <i class="fa-solid fa-circle-check"></i> Active (60s)
+              </button>
+              <button id="btnSeedExpiredRound" class="btn btn-danger btn-sm">
+                <i class="fa-solid fa-circle-xmark"></i> Expired
+              </button>
+            </div>
+          </div>
+
+          <form id="frmSubmitAnswer" class="game-form">
+            <div class="form-row">
+              <div class="form-group">
+                <label for="txtGameId">Game ID</label>
+                <input type="text" id="txtGameId" value="g-501" required>
+              </div>
+              <div class="form-group">
+                <label for="txtRoundId">Round ID</label>
+                <input type="text" id="txtRoundId" value="r-3" required>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="txtGamePlayerId">Player ID</label>
+                <input type="text" id="txtGamePlayerId" placeholder="e.g. player-alpha" required>
+              </div>
+              <div class="form-group">
+                <label for="txtAnswer">Your Answer</label>
+                <input type="text" id="txtAnswer" placeholder="e.g. A" required>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-accent btn-block">Submit Answer Atomically</button>
+          </form>
+
+          <div id="gameConsoleLog" class="console-log hidden"></div>
+        </div>
+      </section>
+
+      <!-- Section C: Admin Session store -->
+      <section class="card admin-card">
+        <div class="card-header">
+          <div class="header-title">
+            <i class="fa-solid fa-user-shield header-icon icon-teal"></i>
+            <h2>Admin Session Manager</h2>
+          </div>
+        </div>
+        <div class="card-body">
+          <!-- Tab selector for Admin tasks -->
+          <div class="admin-tabs">
+            <button class="tab-btn active" data-tab="tabViewSessions">Active Sessions</button>
+            <button class="tab-btn" data-tab="tabCreateSession">Register Session</button>
+          </div>
+
+          <!-- Tab 1: View Sessions -->
+          <div id="tabViewSessions" class="tab-content active">
+            <div class="input-group">
+              <input type="text" id="txtAdminUserId" placeholder="User ID (e.g. user-123)" value="test-user-for-eval-12345">
+              <button id="btnFindSessions" class="btn btn-teal">Get Sessions</button>
+            </div>
+
+            <div class="sessions-results" id="sessionsResults">
+              <div class="display-empty">
+                <i class="fa-solid fa-shield-halved"></i>
+                <p>Query active Redis sessions for a user ID.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: Create Session -->
+          <div id="tabCreateSession" class="tab-content">
+            <form id="frmCreateSession" class="admin-form">
+              <div class="form-group">
+                <label for="txtNewSessionUserId">User ID</label>
+                <input type="text" id="txtNewSessionUserId" value="test-user-for-eval-12345" required>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="txtNewSessionIp">IP Address</label>
+                  <input type="text" id="txtNewSessionIp" value="192.168.1.100" required>
+                </div>
+                <div class="form-group">
+                  <label for="selNewSessionDevice">Device Type</label>
+                  <select id="selNewSessionDevice" required>
+                    <option value="desktop">Desktop</option>
+                    <option value="mobile">Mobile</option>
+                    <option value="tablet">Tablet</option>
+                  </select>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-teal btn-block">Register Session (Invalidate Old)</button>
+            </form>
+            <div id="sessionCreateLog" class="console-log hidden"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <p>Powered by Redis (Hashes, Sorted Sets, Sets, Pub/Sub, Lua Scripts) & Server-Sent Events.</p>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

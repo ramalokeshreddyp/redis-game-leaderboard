@@ -1,0 +1,17 @@
+{
+  "name": "redis-game-leaderboard",
+  "version": "1.0.0",
+  "description": "High-performance real-time leaderboard and session manager with Redis",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "seed": "node scripts/seed_memory_test.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1"
+  }
+}
