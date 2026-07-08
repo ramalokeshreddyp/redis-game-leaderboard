@@ -1,217 +1,230 @@
-# PulseBoard: Redis-Powered Real-Time Game Leaderboard
+# ⚡ PulseBoard: Redis-Powered Real-Time Game Leaderboard & Session Store
 
-A high-performance, real-time competitive game leaderboard and session manager. Built with **Node.js (Express)** and **Redis 7 (alpine)**, containerized with **Docker**, and leveraging **Lua scripting** for atomic operations and **Server-Sent Events (SSE)** for instant UI propagation.
+PulseBoard is a high-performance, real-time leaderboard and user session management engine built for competitive quiz platforms. It demonstrates the power of Redis beyond simple caching by leveraging server-side Hashes, Sorted Sets, and Sets, ensuring concurrency safety via pre-cached Lua scripts, and distributing instant updates using a Redis Pub/Sub to Server-Sent Events (SSE) pipeline.
 
 ---
 
-## Architecture Overview
+## 🏗️ System Architecture & Execution Flows
 
-PulseBoard comprises three main components:
-1.  **Frontend Dashboard**: A responsive, vanilla HTML5/JS/CSS client that connects to the API and displays the global leaderboard, player standing, and active session details. It subscribes to an SSE channel for real-time score updates.
-2.  **API Application Server**: An Express.js backend that handles user requests, interacts with Redis via `ioredis` (including executing pre-cached Lua scripts), and broadcasts event messages.
-3.  **Redis In-Memory Store**: Handles session objects (Hashes), active session indexes (Sets), the global leaderboard (Sorted Sets), round submissions (Sets), round configuration (Hashes), and real-time messaging (Pub/Sub).
+### 1. Unified System Overview
+```mermaid
+graph TD
+    %% Styling
+    classDef client fill:#3498db,stroke:#2980b9,stroke-width:2px,color:#fff;
+    classDef server fill:#9b59b6,stroke:#8e44ad,stroke-width:2px,color:#fff;
+    classDef database fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff;
+    
+    subgraph UI ["Client Layer"]
+        C[Web Dashboard]:::client
+    end
+    
+    subgraph App ["Application Layer"]
+        API[Express.js Server]:::server
+        SSE[SSE Event Stream]:::server
+    end
+    
+    subgraph Cache ["Data & Messaging Layer (Redis)"]
+        Hash[Session Hashes]:::database
+        Set[Session Sets]:::database
+        ZSet[Global Leaderboard ZSet]:::database
+        PubSub[Pub/Sub Engine]:::database
+    end
+    
+    C -->|1. HTTP REST Calls| API
+    API -->|2. Exec Lua / ZINCRBY| ZSet
+    API -->|3. HSET / DEL| Hash
+    API -->|4. SADD / SREM| Set
+    API -->|5. PUBLISH game:events| PubSub
+    PubSub -->|6. Broadcast| SSE
+    SSE -->|7. PUSH Stream| C
+```
+
+### 2. Session Creation & Atomic Invalidation Flow
+When a user logs in, older sessions must be invalidated atomically using a Lua script to prevent race conditions.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Player as Web Client
+    participant Express as API Server
+    participant Lua as Redis Lua Engine
+    participant Session as session:{sessionId} Hash
+    participant UserIdx as user_sessions:{userId} Set
+
+    Player->>Express: POST /api/sessions { userId, ipAddress, deviceType }
+    Note over Express: Generates new UUID sessionId
+    Express->>Lua: EVAL initializeSession (user_sessions:{userId}, session:{sessionId})
+    
+    activate Lua
+    Lua->>UserIdx: SMEMBERS (get all active sessionIds for user)
+    loop For each old sessionId
+        Lua->>Session: DEL session:{oldSessionId}
+    end
+    Lua->>UserIdx: DEL (clear old sessions set)
+    Lua->>Session: HSET (register new session info)
+    Lua->>Session: EXPIRE (set 30 min TTL)
+    Lua->>UserIdx: SADD (add new sessionId)
+    Lua->>UserIdx: EXPIRE (set 30 min TTL)
+    Lua-->>Express: Return Success (1)
+    deactivate Lua
+    
+    Express-->>Player: 201 Created { sessionId }
+```
+
+### 3. Atomic Quiz Answer Submission & Propagation Flow
+Handles checking round state, enforcing duplicate prevention, updating scores, and pushing live events.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Player as Web Client
+    participant Express as API Server
+    participant Lua as Redis Lua Engine
+    participant Round as game_round:{gameId}:{roundId} Hash
+    participant Sub as submissions:{gameId}:{roundId} Set
+    participant ZSet as leaderboard:global ZSet
+    participant PubSub as Redis Pub/Sub
+    participant SSE as SSE Stream (Other Clients)
+
+    Player->>Express: POST /api/game/submit { gameId, roundId, playerId, answer }
+    Express->>Lua: EVAL submitQuizAnswer (roundKey, submissionsKey, globalLeaderboardKey)
+    
+    activate Lua
+    Lua->>Round: HGET endTime
+    alt Current Time >= endTime
+        Lua-->>Express: Return {"ERROR", "ROUND_EXPIRED"}
+    end
+    
+    Lua->>Sub: SISMEMBER playerId
+    alt Already Submitted (is_member == 1)
+        Lua-->>Express: Return {"ERROR", "DUPLICATE_SUBMISSION"}
+    end
+    
+    Lua->>Sub: SADD playerId
+    Lua->>Round: HGET correctAnswer & points
+    alt submittedAnswer == correctAnswer
+        Lua->>ZSet: ZINCRBY (increment points)
+        Note over Lua: scoreUpdated = 1
+    else
+        Lua->>ZSet: ZSCORE (get current score)
+        Note over Lua: scoreUpdated = 0
+    end
+    Lua-->>Express: Return {"SUCCESS", newScore, scoreUpdated}
+    deactivate Lua
+
+    alt Status == SUCCESS
+        Express-->>Player: 200 OK { status: "SUCCESS", newScore }
+        alt scoreUpdated == 1
+            Express->>PubSub: PUBLISH game:events { event: "leaderboard_updated", data }
+            PubSub->>SSE: Broadcast message
+            SSE->>Player: PUSH Event "leaderboard_updated" (Real-time updates)
+        end
+    else status == ERROR
+        alt Code == ROUND_EXPIRED
+            Express-->>Player: 403 Forbidden { status: "ERROR", code: "ROUND_EXPIRED" }
+        else Code == DUPLICATE_SUBMISSION
+            Express-->>Player: 400 Bad Request { status: "ERROR", code: "DUPLICATE_SUBMISSION" }
+        end
+    end
+```
+
+---
+
+## 🛠️ Technology Stack
+
+*   **Runtime**: [Node.js (v20-alpine)](https://nodejs.org/)
+*   **Web Framework**: [Express.js](https://expressjs.com/)
+*   **Database**: [Redis 7 (alpine)](https://redis.io/)
+*   **Redis Client**: [ioredis](https://github.com/redis/ioredis)
+*   **Containerization**: [Docker](https://www.docker.com/) & [Docker Compose](https://docs.docker.com/compose/)
+*   **Frontend**: Vanilla HTML5, CSS3 (Glassmorphism, custom micro-animations), and Vanilla JavaScript (using `EventSource` for SSE).
+
+---
+
+## 📁 Code Structure & Organization
 
 ```
-   +-----------------------------------------------------------+
-   |                    Browser Client (UI)                    |
-   +-----+----------------------+------------------------------+
-         |                      ^              ^
-         | HTTP REST Requests   | EventSource  |
-         | (Login, Answers)     | (/api/events)| SSE Updates
-         v                      |              |
-   +-----+----------------------+--------------+---------------+
-   |                      Game API Server                      |
-   +-----+----------------------+------------------------------+
-         |                      |              ^
-         | ioredis Commands     | PUBLISH      | SUBSCRIBE
-         | (Hashes, ZSets, Lua) | game:events  | game:events
-         v                      v              |
-   +----------------------------+--------------+---------------+
-   |                        Redis Server                       |
-   +-----------------------------------------------------------+
+redis-game-leaderboard/
+│
+├── .env                  # Running configuration variables (ignored by git)
+├── .env.example          # Template documenting environment variables
+├── Dockerfile            # Multi-stage Docker setup for api service
+├── docker-compose.yml    # Main orchestration stack (api + redis services)
+├── package.json          # Dependencies & npm scripts
+├── server.js             # Core Express server & Redis Lua loading logic
+│
+├── public/               # Client-side web dashboard code
+│   ├── index.html        # Glassmorphic single page dashboard
+│   ├── css/
+│   │   └── style.css     # Dark mode CSS with glowing highlights & transitions
+│   └── js/
+│       └── app.js        # SSE listeners, DOM updates, & API controllers
+│
+├── scripts/
+│   └── seed_memory_test.js  # Seeding tool & memory analysis benchmark runner
+│
+├── MEMORY_ANALYSIS.md    # Findings on listpack vs skiplist encoding
+├── README.md             # This highly attractive system overview
+├── architecture.md       # High-level architecture documentation
+├── projectdocumentation.md  # Detailed system objective and specs
+└── submission.json       # Config file containing evaluator test credentials
 ```
 
 ---
 
-## Redis Key Schema Design
+## 🚀 Setup & Installation Steps
 
-We adopt the `object-type:id:field` convention to organize Redis keys:
+Follow these steps to run the application locally from scratch:
 
-| Data Type | Key Pattern | Example Key | Description |
-| :--- | :--- | :--- | :--- |
-| **Session Hash** | `session:{sessionId}` | `session:d2f4...` | A Hash containing user session data (`userId`, `ipAddress`, `deviceType`, `createdAt`, `lastActive`). Has a 30-min TTL. |
-| **User Sessions Index** | `user_sessions:{userId}` | `user_sessions:42` | A Set containing all active session IDs for the user. Used for session invalidation. |
-| **Global Leaderboard** | `leaderboard:global` | `leaderboard:global` | A Sorted Set (ZSet) storing all player IDs sorted by their total scores. |
-| **Game Round State** | `game_round:{gameId}:{roundId}` | `game_round:g-501:r-3` | A Hash containing round configurations (`correctAnswer`, `points`, `endTime`). |
-| **Round Submissions** | `submissions:{gameId}:{roundId}` | `submissions:g-501:r-3` | A Set storing player IDs who have submitted answers for this round. Prevents duplicate submissions. |
+### 1. Clone & Configure
+Clone this project to your local directory.
+Copy the environment variables template:
+```bash
+cp .env.example .env
+```
+Ensure the default variables in `.env` are set:
+```env
+REDIS_URL=redis://redis:6379
+API_PORT=3000
+```
 
----
+### 2. Run with Docker Compose
+Ensure Docker Desktop is open and active, then run:
+```bash
+docker-compose up -d --build
+```
+This builds the application image, downloads Redis alpine, configures mutual health checks, and starts the services.
 
-## Detailed Lua Scripts and Atomic Operations
-
-Many operations in a real-time system require multiple sequential steps (e.g. read value -> check condition -> update state). If multiple clients execute these concurrently, race conditions and inconsistent states occur. 
-To guarantee absolute data integrity, PulseBoard uses **atomic Lua scripting (`EVAL`)** for two critical operations:
-
-### 1. Atomic Session Login and Invalidation (`initializeSession`)
-*   **Location**: Defined inside `server.js` and loaded on start.
-*   **Keys**: `KEYS[1] = user_sessions:{userId}`, `KEYS[2] = session:{sessionId}`
-*   **Goal**: Ensure a user has at most one active session at a time.
-*   **Rationale for Lua**:
-    Without Lua, a client would fetch active sessions from the Set, iterate through each and delete them, then create the new session and write to the Set. If two login requests for the same user occur concurrently:
-    1. Both read the existing sessions at the same time.
-    2. Both proceed to delete them.
-    3. Both register their respective new sessions.
-    This can leave both sessions active or leak old keys in Redis.
-    **Lua execution is single-threaded and block-exclusive inside Redis**, guaranteeing that the fetch, bulk delete, clear, and new registration happen as a single, indivisible step. No other command can run in between.
-
-### 2. Atomic Quiz Answer Processor (`submitQuizAnswer`)
-*   **Location**: Defined inside `server.js`.
-*   **Keys**: `KEYS[1] = game_round:{gameId}:{roundId}`, `KEYS[2] = submissions:{gameId}:{roundId}`, `KEYS[3] = leaderboard:global`
-*   **Goal**: Atomically submit a player's answer, validating the round expiration and preventing duplicates.
-*   **Lua Logic**:
-    1. Read the round's `endTime` and compare it with the current timestamp. If `currentTime >= endTime`, return `["ERROR", "ROUND_EXPIRED"]`.
-    2. Query `SISMEMBER` on the round's submission Set. If the player has already submitted, return `["ERROR", "DUPLICATE_SUBMISSION"]`.
-    3. Add the player to the submission Set (`SADD`).
-    4. Fetch `correctAnswer` and `points` from the round Hash. If the submitted answer is correct, increment the player's score on `leaderboard:global` using `ZINCRBY`. If incorrect, fetch the current score using `ZSCORE` without updating.
-    5. Return `["SUCCESS", newScore, scoreUpdated]`.
-*   **Rationale for Lua**:
-    If a player submits their answer multiple times in rapid succession (e.g., clicking the button twice), standard HTTP handlers might process both requests in parallel. If we did not use Lua, two concurrent processes could both check `SISMEMBER` (both find it is false), and both proceed to increment the score, awarding double points for a single answer. By consolidating all checks and updates inside a single Lua script, Redis guarantees that only the first request records a submission and awards points, while the second request is immediately rejected as a duplicate.
+Verify that both containers are healthy:
+```bash
+docker ps
+```
+The status should display `Up X seconds (healthy)`.
 
 ---
 
-## Setup & Running the Application
+## 💻 Local Execution & Usage Instructions
 
-### Prerequisites
-*   [Docker Desktop](https://www.docker.com/products/docker-desktop/) (ensure it is running)
-*   [Docker Compose](https://docs.docker.com/compose/)
+### 1. Access the Dashboard
+Once the containers are running, navigate to:
+```
+http://localhost:3000
+```
+This loads the single-page application. The status indicator at the top right will glow green and read `Live Stream Connected` when the SSE pipeline is active.
 
-### Quick Start
-1.  Clone this repository (or place files in your directory).
-2.  Run the services using a single command:
-    ```bash
-    docker-compose up -d --build
-    ```
-3.  Wait until the containers are started and healthy.
-4.  Open your browser and navigate to:
-    ```
-    http://localhost:3000
-    ```
-    You will be greeted by the **PulseBoard Dashboard**!
+### 2. Interactive Seeding & Playing
+You can test the entire system flow using the widgets on the dashboard:
+*   **Seed Game Round**: Click `Active (60s)` to create a round (`r-3`) that is open for submissions, or click `Expired` to create one that is closed.
+*   **Quiz Console**: Submit answers for players (e.g. Player `player-1` submits `A`). Correct answers will immediately trigger a score increase on the board.
+*   **Live Updates**: Watch the dashboard. When a score updates, an SSE event is caught, adding a message to the scrolling **Live Feed ticker** at the top, and highlighting the updated row in the leaderboard with a green pulse animation.
+*   **Player Performance Finder**: Search for a player ID to view their rank, score, calculated percentile standing, and a list of rivals directly above and below them.
+*   **Admin Session Manager**: Register a session (which invalidates old sessions for that user) and view/delete sessions live in Redis.
 
 ---
 
-## API Endpoints
-
-### 1. Health Check
-*   `GET /health`
-*   Returns `200 OK` if the server and Redis are up:
-    ```json
-    { "status": "OK", "redis": "CONNECTED" }
-    ```
-
-### 2. User Session Management
-*   `POST /api/sessions`
-    Creates a new user session and invalidates any existing active sessions.
-    *   **Body**:
-        ```json
-        { "userId": "user-abc", "ipAddress": "192.168.1.1", "deviceType": "desktop" }
-        ```
-    *   **Response (201 Created)**:
-        ```json
-        { "sessionId": "824b2670-b74a-49eb-83b6-9bb5ab6a0c5c" }
-        ```
-
-### 3. Global Leaderboard
-*   `POST /api/leaderboard/scores`
-    Directly submits or increments a player's score (atomic ZINCRBY).
-    *   **Body**:
-        ```json
-        { "playerId": "player-1", "points": 10 }
-        ```
-    *   **Response (200 OK)**:
-        ```json
-        { "playerId": "player-1", "newScore": 10 }
-        ```
-
-*   `GET /api/leaderboard/top/:count`
-    Returns the top player list.
-    *   **Response (200 OK)**:
-        ```json
-        [
-          { "rank": 1, "playerId": "player-1", "score": 100 }
-        ]
-        ```
-
-*   `GET /api/leaderboard/player/:playerId`
-    Gets a player's score, rank, percentile standing, and nearby rivals.
-    *   **Response (200 OK)**:
-        ```json
-        {
-          "playerId": "player-alpha",
-          "score": 100,
-          "rank": 10,
-          "percentile": 95.5,
-          "nearbyPlayers": {
-            "above": [{ "rank": 9, "playerId": "player-beta", "score": 102 }],
-            "below": [{ "rank": 11, "playerId": "player-gamma", "score": 98 }]
-          }
-        }
-        ```
-
-### 4. Game Round Submissions
-*   `POST /api/game/submit`
-    Atomically validates round state, submission uniqueness, and calculates score increments.
-    *   **Body**:
-        ```json
-        { "gameId": "g-501", "roundId": "r-3", "playerId": "player-alpha", "answer": "A" }
-        ```
-    *   **Response (200 OK)**:
-        ```json
-        { "status": "SUCCESS", "newScore": 123 }
-        ```
-    *   **Error Responses**:
-        *   `400 Bad Request`: `{ "status": "ERROR", "code": "DUPLICATE_SUBMISSION" }`
-        *   `403 Forbidden`: `{ "status": "ERROR", "code": "ROUND_EXPIRED" }`
-
-### 5. Server-Sent Events (SSE)
-*   `GET /api/events`
-    Long-lived connection that streams live game event broadcasts.
-    *   **Event Format**:
-        ```
-        event: leaderboard_updated
-        data: {"playerId":"player-alpha","newScore":75}
-        ```
-
-### 6. Admin Endpoints
-*   `GET /api/admin/sessions/user/:userId`
-    Returns all active session hashes registered under the user ID.
-    *   **Response (200 OK)**:
-        ```json
-        [
-          { "sessionId": "...", "ipAddress": "192.168.1.1", "deviceType": "desktop" }
-        ]
-        ```
-
-*   `DELETE /api/admin/sessions/:sessionId`
-    Invalidates and deletes a specific session hash and removes it from the user set.
-    *   **Response (204 No Content)**
-
-*   `POST /api/admin/rounds`
-    Utility endpoint to configure a mock round for interactive UI testing.
-    *   **Body**:
-        ```json
-        { "gameId": "g-501", "roundId": "r-3", "correctAnswer": "A", "points": 15, "durationSeconds": 60 }
-        ```
-    *   **Response (201 Created)**
-
----
-
-## Memory Analysis & Benchmarking
-
-To run the memory benchmark and seed 100,000 players:
-1. Make sure your Docker container `game_api` is running.
-2. Execute the seeding script inside the container:
-   ```bash
-   docker exec game_api node scripts/seed_memory_test.js
-   ```
-For detailed results, see the [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md) file.
+## 📊 Run Benchmarking & Memory Tests
+To replicate the listpack/skiplist memory analysis and seed 100k test records into your local Redis database:
+```bash
+docker exec game_api node scripts/seed_memory_test.js
+```
+The results and explanation can be viewed in [MEMORY_ANALYSIS.md](MEMORY_ANALYSIS.md).
